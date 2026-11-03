@@ -78,9 +78,6 @@ var (
 
 const emailRequestTimeout = time.Second
 
-// maxOrderLines caps the number of distinct products in one order.
-const maxOrderLines = 1
-
 // expressShippingFlag is the LaunchDarkly flag that gates express shipping quotes.
 const expressShippingFlag = "checkout-express-shipping"
 
@@ -473,9 +470,6 @@ func (cs *checkout) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Contex
 	cartItems, err := cs.getUserCart(ctx, userID)
 	if err != nil {
 		return out, fmt.Errorf("cart failure: %+v", err)
-	}
-	if len(cartItems) > maxOrderLines {
-		return out, fmt.Errorf("order exceeds the maximum of %d product lines: got %d", maxOrderLines, len(cartItems))
 	}
 	orderItems, err := cs.prepOrderItems(ctx, cartItems, userCurrency)
 	if err != nil {

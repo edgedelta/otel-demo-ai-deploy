@@ -15,6 +15,7 @@ import (
 	ld "github.com/launchdarkly/go-server-sdk/v7"
 	"github.com/launchdarkly/go-server-sdk/v7/ldcomponents"
 	"github.com/launchdarkly/go-server-sdk/v7/testhelpers/ldtestdata"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -160,5 +161,70 @@ func TestServerStartupAndGracefulStop(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not exit after GracefulStop")
+	}
+}
+
+type fakeCartClient struct {
+	pb.CartServiceClient
+	items []*pb.CartItem
+}
+
+func (f *fakeCartClient) GetCart(context.Context, *pb.GetCartRequest, ...grpc.CallOption) (*pb.Cart, error) {
+	return &pb.Cart{Items: f.items}, nil
+}
+
+type fakeCatalogClient struct {
+	pb.ProductCatalogServiceClient
+}
+
+func (fakeCatalogClient) GetProduct(_ context.Context, req *pb.GetProductRequest, _ ...grpc.CallOption) (*pb.Product, error) {
+	return &pb.Product{Id: req.GetId(), PriceUsd: &pb.Money{CurrencyCode: "USD", Units: 10}}, nil
+}
+
+type fakeCurrencyClient struct {
+	pb.CurrencyServiceClient
+}
+
+func (fakeCurrencyClient) Convert(_ context.Context, req *pb.CurrencyConversionRequest, _ ...grpc.CallOption) (*pb.Money, error) {
+	return &pb.Money{CurrencyCode: req.GetToCode(), Units: req.GetFrom().GetUnits(), Nanos: req.GetFrom().GetNanos()}, nil
+}
+
+// Regression test: multi-product carts (as sent by the load generator and real
+// customers) must be accepted, not rejected with a product-line cap error.
+func TestPrepareOrderAcceptsMultiProductCart(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	items := []*pb.CartItem{
+		{ProductId: "OLJCESPC7Z", Quantity: 1},
+		{ProductId: "66VCHSJNUP", Quantity: 2},
+		{ProductId: "1YMWWN1N4O", Quantity: 3},
+		{ProductId: "L9ECAV7KIM", Quantity: 4},
+	}
+	cs := &checkout{
+		shippingSvcAddr:         "http://shipping.test",
+		cartSvcClient:           &fakeCartClient{items: items},
+		productCatalogSvcClient: fakeCatalogClient{},
+		currencySvcClient:       fakeCurrencyClient{},
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":8}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(context.Background(), "user-1", "USD", &pb.Address{})
+	if err != nil {
+		t.Fatalf("prepareOrderItemsAndShippingQuoteFromCart() with %d product lines error = %v", len(items), err)
+	}
+	if got := len(prep.orderItems); got != len(items) {
+		t.Errorf("order items = %d, want %d", got, len(items))
+	}
+	if got := len(prep.cartItems); got != len(items) {
+		t.Errorf("cart items = %d, want %d", got, len(items))
 	}
 }
