@@ -1,0 +1,54 @@
+# Values for the Edge Delta AI teammate demo, on top of chart opentelemetry-demo 0.42.6.
+components:
+  checkout:
+    imageOverride:
+      repository: 788198741820.dkr.ecr.us-west-2.amazonaws.com/otel-demo-ai-deploy-checkout
+    envOverrides:
+      - name: LAUNCHDARKLY_SDK_KEY
+        valueFrom:
+          secretKeyRef:
+            name: launchdarkly
+            key: sdk-key
+            optional: true
+      - name: GOMEMLIMIT
+        value: 48MiB
+    resources:
+      limits:
+        memory: 64Mi
+  load-generator:
+    envOverrides:
+      - name: LOCUST_USERS
+        value: "10"
+
+jaeger:
+  enabled: false
+prometheus:
+  enabled: false
+grafana:
+  enabled: false
+opensearch:
+  enabled: false
+
+opentelemetry-collector:
+  # The Edge Delta agent runs on the host network and holds 4317 on every node; services reach the collector by Service.
+  ports:
+    otlp:
+      hostPort: null
+    otlp-http:
+      hostPort: null
+  config:
+    exporters:
+      otlp_grpc/edgedelta:
+        endpoint: ed-data-supply-svc.edgedelta.svc.cluster.local:4317
+        tls:
+          insecure: true
+        sending_queue:
+          batch: {}
+    service:
+      pipelines:
+        traces:
+          exporters: [otlp_grpc/edgedelta, debug, span_metrics]
+        metrics:
+          exporters: [otlp_grpc/edgedelta, debug]
+        logs:
+          exporters: [otlp_grpc/edgedelta, debug]

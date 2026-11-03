@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	ld "github.com/launchdarkly/go-server-sdk/v7"
+	"github.com/launchdarkly/go-server-sdk/v7/ldcomponents"
+	"github.com/launchdarkly/go-server-sdk/v7/testhelpers/ldtestdata"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -19,6 +22,38 @@ import (
 
 	pb "github.com/open-telemetry/opentelemetry-demo/src/checkout/genproto/oteldemo"
 )
+
+func TestFlagEnabled(t *testing.T) {
+	newClient := func(t *testing.T, value bool) *ld.LDClient {
+		t.Helper()
+		td := ldtestdata.DataSource()
+		td.Update(td.Flag(expressShippingFlag).VariationForAll(value))
+		client, err := ld.MakeCustomClient("test", ld.Config{DataSource: td, Events: ldcomponents.NoEvents()}, 0)
+		if err != nil {
+			t.Fatalf("make client: %v", err)
+		}
+		t.Cleanup(func() { client.Close() })
+		return client
+	}
+
+	tests := []struct {
+		desc   string
+		client func(t *testing.T) *ld.LDClient
+		key    string
+		want   bool
+	}{
+		{desc: "no client", client: func(*testing.T) *ld.LDClient { return nil }, key: expressShippingFlag, want: false},
+		{desc: "flag on", client: func(t *testing.T) *ld.LDClient { return newClient(t, true) }, key: expressShippingFlag, want: true},
+		{desc: "flag off", client: func(t *testing.T) *ld.LDClient { return newClient(t, false) }, key: expressShippingFlag, want: false},
+		{desc: "unknown flag", client: func(t *testing.T) *ld.LDClient { return newClient(t, true) }, key: "missing", want: false},
+	}
+	for _, tc := range tests {
+		cs := &checkout{ld: tc.client(t)}
+		if got := cs.flagEnabled(tc.key); got != tc.want {
+			t.Errorf("%s: got: %v, want: %v", tc.desc, got, tc.want)
+		}
+	}
+}
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
