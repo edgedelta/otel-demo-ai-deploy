@@ -81,6 +81,12 @@ const emailRequestTimeout = time.Second
 // expressShippingFlag is the LaunchDarkly flag that gates express shipping quotes.
 const expressShippingFlag = "checkout-express-shipping"
 
+// expressQuoteAttempts and expressQuoteBackoff bound the express shipping quote retries.
+const (
+	expressQuoteAttempts = 3
+	expressQuoteBackoff  = 500 * time.Millisecond
+)
+
 // ldContext is the LaunchDarkly evaluation context for this service.
 var ldContext = ldcontext.New("checkout")
 
@@ -479,6 +485,9 @@ func (cs *checkout) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Contex
 	if err != nil {
 		return out, fmt.Errorf("shipping quote failure: %+v", err)
 	}
+	if cs.flagEnabled(expressShippingFlag) {
+		shippingUSD = cs.quoteExpressShipping(ctx, address, cartItems, shippingUSD)
+	}
 	shippingPrice, err := cs.convertCurrency(ctx, shippingUSD, userCurrency)
 	if err != nil {
 		return out, fmt.Errorf("failed to convert shipping cost to currency: %+v", err)
@@ -500,6 +509,24 @@ func (cs *checkout) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Contex
 		attribute.Int("demo.order.items.count", len(orderItems)),
 	)
 	return out, nil
+}
+
+// quoteExpressShipping retries the express quote and falls back to the standard quote.
+func (cs *checkout) quoteExpressShipping(ctx context.Context, address *pb.Address, items []*pb.CartItem, standard *pb.Money) *pb.Money {
+	ctx, span := tracer.Start(ctx, "quoteExpressShipping")
+	defer span.End()
+
+	quote := standard
+	for attempt := 1; attempt <= expressQuoteAttempts; attempt++ {
+		q, err := cs.quoteShipping(ctx, address, items)
+		if err != nil {
+			logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
+		} else {
+			quote = q
+		}
+		time.Sleep(expressQuoteBackoff)
+	}
+	return quote
 }
 
 func mustCreateClient(svcAddr string) *grpc.ClientConn {
