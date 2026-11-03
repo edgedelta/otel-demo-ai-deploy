@@ -1,4 +1,10 @@
 # Values for the Edge Delta AI teammate demo, on top of chart opentelemetry-demo 0.42.6.
+default:
+  # Delta temporality so a metric's average reflects the last minute, not everything since the pod started.
+  envOverrides:
+    - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+      value: delta
+
 components:
   checkout:
     imageOverride:
