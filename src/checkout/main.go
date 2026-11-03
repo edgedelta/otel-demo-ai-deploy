@@ -81,6 +81,12 @@ const emailRequestTimeout = time.Second
 // expressShippingFlag is the LaunchDarkly flag that gates express shipping quotes.
 const expressShippingFlag = "checkout-express-shipping"
 
+// ordersByCurrency counts placed orders per user currency.
+var (
+	ordersByCurrency   map[string]int
+	ordersByCurrencyMu sync.Mutex
+)
+
 // ldContext is the LaunchDarkly evaluation context for this service.
 var ldContext = ldcontext.New("checkout")
 
@@ -372,6 +378,10 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
+
+	ordersByCurrencyMu.Lock()
+	ordersByCurrency[req.UserCurrency]++
+	ordersByCurrencyMu.Unlock()
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
