@@ -5,6 +5,8 @@ go 1.26.0
 require (
 	github.com/IBM/sarama v1.60.2
 	github.com/google/uuid v1.6.0
+	github.com/launchdarkly/go-sdk-common/v3 v3.6.0
+	github.com/launchdarkly/go-server-sdk/v7 v7.21.2
 	github.com/open-feature/go-sdk v1.18.0
 	github.com/open-feature/go-sdk-contrib/hooks/open-telemetry v0.3.7
 	github.com/open-feature/go-sdk-contrib/providers/flagd v0.6.0
@@ -40,6 +42,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/gregjones/httpcache v0.0.0-20171119193500-2bcd89a1743f // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-memdb v1.3.5 // indirect
@@ -51,9 +54,18 @@ require (
 	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
+	github.com/josharian/intern v1.0.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/launchdarkly/ccache v1.1.0 // indirect
+	github.com/launchdarkly/eventsource v1.14.2 // indirect
+	github.com/launchdarkly/go-jsonstream/v3 v3.1.2 // indirect
+	github.com/launchdarkly/go-sdk-events/v3 v3.8.1 // indirect
+	github.com/launchdarkly/go-semver v1.0.3 // indirect
+	github.com/launchdarkly/go-server-sdk-evaluation/v3 v3.2.0 // indirect
+	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/open-feature/flagd-schemas v0.2.13 // indirect
 	github.com/open-feature/flagd/core v0.16.0 // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/pierrec/lz4/v4 v4.1.29 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
@@ -69,6 +81,7 @@ require (
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect

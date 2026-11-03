@@ -26,6 +26,8 @@ import (
 
 	"github.com/IBM/sarama"
 	"github.com/google/uuid"
+	"github.com/launchdarkly/go-sdk-common/v3/ldcontext"
+	ld "github.com/launchdarkly/go-server-sdk/v7"
 	otelhooks "github.com/open-feature/go-sdk-contrib/hooks/open-telemetry/pkg"
 	flagd "github.com/open-feature/go-sdk-contrib/providers/flagd/pkg"
 	"github.com/open-feature/go-sdk/openfeature"
@@ -75,6 +77,12 @@ var (
 )
 
 const emailRequestTimeout = time.Second
+
+// expressShippingFlag is the LaunchDarkly flag that gates express shipping quotes.
+const expressShippingFlag = "checkout-express-shipping"
+
+// ldContext is the LaunchDarkly evaluation context for this service.
+var ldContext = ldcontext.New("checkout")
 
 func initResource() *sdkresource.Resource {
 	initResourcesOnce.Do(func() {
@@ -158,6 +166,19 @@ type checkout struct {
 	emailSvcClient          pb.EmailServiceClient
 	paymentSvcClient        pb.PaymentServiceClient
 	httpClient              *http.Client
+	ld                      *ld.LDClient
+}
+
+// flagEnabled reports whether a LaunchDarkly boolean flag is on, and false without a client.
+func (cs *checkout) flagEnabled(key string) bool {
+	if cs.ld == nil {
+		return false
+	}
+	on, err := cs.ld.BoolVariation(key, ldContext, false)
+	if err != nil {
+		return false
+	}
+	return on
 }
 
 func main() {
@@ -213,6 +234,17 @@ func main() {
 	svc := new(checkout)
 	svc.httpClient = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
+	}
+
+	if key := os.Getenv("LAUNCHDARKLY_SDK_KEY"); key != "" {
+		// MakeClient returns a usable client even on error and keeps retrying in the background.
+		svc.ld, err = ld.MakeClient(key, 5*time.Second)
+		if err != nil {
+			logger.Error("launchdarkly client not ready", slog.Any("error", err))
+		}
+		if svc.ld != nil {
+			defer svc.ld.Close()
+		}
 	}
 
 	mustMapEnv(&svc.shippingSvcAddr, "SHIPPING_ADDR")

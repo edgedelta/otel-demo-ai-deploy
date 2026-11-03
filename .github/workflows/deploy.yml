@@ -1,0 +1,87 @@
+# Builds the checkout image for one commit and deploys the demo to EKS.
+name: deploy
+run-name: deploy ${{ inputs.sha || github.sha }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to deploy; empty deploys the head of the selected ref.
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-demo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  EKS_CLUSTER: ai-demo-deploy
+  ECR_REPOSITORY: 788198741820.dkr.ecr.us-west-2.amazonaws.com/otel-demo-ai-deploy-checkout
+  CHART_VERSION: 0.42.6
+  DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+
+jobs:
+  deploy:
+    # One job, so each run creates exactly one GitHub deployment in this environment.
+    runs-on: ubuntu-latest
+    environment: demo
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::788198741820:role/otel-demo-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check for an existing image
+        id: image
+        run: |
+          if aws ecr describe-images --repository-name otel-demo-ai-deploy-checkout --image-ids imageTag="$DEPLOY_SHA" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to ECR
+        if: steps.image.outputs.exists == 'false'
+        run: aws ecr get-login-password | docker login --username AWS --password-stdin "${ECR_REPOSITORY%%/*}"
+
+      - uses: docker/setup-buildx-action@v4.4.1
+        if: steps.image.outputs.exists == 'false'
+
+      - uses: docker/build-push-action@v7.4.0
+        if: steps.image.outputs.exists == 'false'
+        with:
+          context: .
+          file: src/checkout/Dockerfile
+          push: true
+          tags: ${{ env.ECR_REPOSITORY }}:${{ env.DEPLOY_SHA }}
+          cache-from: type=gha,scope=checkout
+          cache-to: type=gha,mode=max,scope=checkout
+
+      - name: Deploy
+        run: |
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm upgrade --install otel-demo open-telemetry/opentelemetry-demo \
+            --version "$CHART_VERSION" -n otel-demo \
+            -f deploy/edgedelta/values.yaml \
+            --set components.checkout.imageOverride.tag="$DEPLOY_SHA"
+          kubectl -n otel-demo rollout status deploy/checkout --timeout=180s
+
+      - name: Let post-deploy traffic reach the new pods
+        # The deployment status turns success when this job ends, so Deployment watch sees real traffic.
+        run: sleep 120
+
+      - name: Summary
+        run: echo "Deployed checkout at \`$DEPLOY_SHA\` (run ref \`$GITHUB_SHA\`)." >> "$GITHUB_STEP_SUMMARY"
