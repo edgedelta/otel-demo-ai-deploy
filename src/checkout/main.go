@@ -693,6 +693,17 @@ func (cs *checkout) shipOrder(ctx context.Context, address *pb.Address, items []
 }
 
 func (cs *checkout) sendToPostProcessor(ctx context.Context, result *pb.OrderResult) {
+	// The producer is nil when kafka.CreateKafkaProducer failed at startup (e.g. broker
+	// unreachable). Post-processing is best-effort, so skip it instead of panicking
+	// after the customer has already been charged.
+	if cs.KafkaProducerClient == nil {
+		logger.LogAttrs(ctx, slog.LevelError, "Kafka producer is not initialized, skipping postProcessor message",
+			slog.String("kafka.broker", cs.kafkaBrokerSvcAddr),
+			slog.String("demo.order.id", result.GetOrderId()),
+		)
+		return
+	}
+
 	message, err := proto.Marshal(result)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to marshal message to protobuf: %+v", err))

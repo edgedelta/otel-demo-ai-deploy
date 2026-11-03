@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	ld "github.com/launchdarkly/go-server-sdk/v7"
 	"github.com/launchdarkly/go-server-sdk/v7/ldcomponents"
 	"github.com/launchdarkly/go-server-sdk/v7/testhelpers/ldtestdata"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -160,5 +163,27 @@ func TestServerStartupAndGracefulStop(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not exit after GracefulStop")
+	}
+}
+
+func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
+	var logs bytes.Buffer
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.NewTextHandler(&logs, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	// Broker address configured but producer creation failed at startup.
+	cs := &checkout{kafkaBrokerSvcAddr: "kafka:9092"}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("sendToPostProcessor panicked with nil producer: %v", r)
+		}
+	}()
+	cs.sendToPostProcessor(context.Background(), &pb.OrderResult{OrderId: "order-1"})
+
+	if !strings.Contains(logs.String(), "Kafka producer is not initialized") {
+		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
