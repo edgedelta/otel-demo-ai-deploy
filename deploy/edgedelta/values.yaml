@@ -4,6 +4,9 @@ default:
   envOverrides:
     - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
       value: delta
+    # Export every 10 s so a slowdown reaches Edge Delta within seconds of the minute it happens in.
+    - name: OTEL_METRIC_EXPORT_INTERVAL
+      value: "10000"
 
 components:
   checkout:
