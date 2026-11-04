@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,5 +186,129 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "Kafka producer is not initialized") {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
+	}
+}
+
+// newQuoteTestCheckout returns a checkout whose shipping /get-quote calls are served by respond.
+func newQuoteTestCheckout(t *testing.T, respond func(call int32, req *http.Request) (*http.Response, error)) (*checkout, *atomic.Int32) {
+	t.Helper()
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.DiscardHandler)
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	calls := &atomic.Int32{}
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return respond(calls.Add(1), req)
+		}),
+	}
+	return &checkout{shippingSvcAddr: "http://shipping.test", httpClient: client}, calls
+}
+
+func quoteResponse(req *http.Request, units int64) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(fmt.Sprintf(`{"cost_usd":{"currency_code":"USD","units":%d}}`, units))),
+		Header:     make(http.Header),
+		Request:    req,
+	}
+}
+
+func unavailableResponse(req *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+		Request:    req,
+	}
+}
+
+var standardQuote = &pb.Money{CurrencyCode: "USD", Units: 1}
+
+func TestQuoteExpressShippingReturnsFirstSuccessWithoutBackoff(t *testing.T) {
+	cs, calls := newQuoteTestCheckout(t, func(_ int32, req *http.Request) (*http.Response, error) {
+		return quoteResponse(req, 9), nil
+	})
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standardQuote)
+	elapsed := time.Since(start)
+
+	if got.GetUnits() != 9 {
+		t.Errorf("quote units = %d, want 9", got.GetUnits())
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("shipping calls = %d, want 1", n)
+	}
+	if elapsed >= expressQuoteBackoff {
+		t.Errorf("elapsed = %v, want < %v (no backoff after success)", elapsed, expressQuoteBackoff)
+	}
+}
+
+func TestQuoteExpressShippingRetriesAfterFailure(t *testing.T) {
+	cs, calls := newQuoteTestCheckout(t, func(call int32, req *http.Request) (*http.Response, error) {
+		if call == 1 {
+			return unavailableResponse(req), nil
+		}
+		return quoteResponse(req, 7), nil
+	})
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standardQuote)
+	elapsed := time.Since(start)
+
+	if got.GetUnits() != 7 {
+		t.Errorf("quote units = %d, want 7", got.GetUnits())
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("shipping calls = %d, want 2", n)
+	}
+	if elapsed < expressQuoteBackoff || elapsed >= 2*expressQuoteBackoff {
+		t.Errorf("elapsed = %v, want one backoff of %v", elapsed, expressQuoteBackoff)
+	}
+}
+
+func TestQuoteExpressShippingFallsBackAfterExhaustion(t *testing.T) {
+	cs, calls := newQuoteTestCheckout(t, func(_ int32, req *http.Request) (*http.Response, error) {
+		return unavailableResponse(req), nil
+	})
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standardQuote)
+	elapsed := time.Since(start)
+
+	if got != standardQuote {
+		t.Errorf("quote = %v, want standard fallback %v", got, standardQuote)
+	}
+	if n := calls.Load(); n != expressQuoteAttempts {
+		t.Errorf("shipping calls = %d, want %d", n, expressQuoteAttempts)
+	}
+	wantBackoff := time.Duration(expressQuoteAttempts-1) * expressQuoteBackoff
+	if elapsed < wantBackoff || elapsed >= wantBackoff+expressQuoteBackoff {
+		t.Errorf("elapsed = %v, want %v (no backoff after final attempt)", elapsed, wantBackoff)
+	}
+}
+
+func TestQuoteExpressShippingStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs, calls := newQuoteTestCheckout(t, func(_ int32, req *http.Request) (*http.Response, error) {
+		cancel()
+		return unavailableResponse(req), nil
+	})
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(ctx, &pb.Address{}, nil, standardQuote)
+	elapsed := time.Since(start)
+
+	if got != standardQuote {
+		t.Errorf("quote = %v, want standard fallback %v", got, standardQuote)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("shipping calls = %d, want 1", n)
+	}
+	if elapsed >= expressQuoteBackoff {
+		t.Errorf("elapsed = %v, want < %v (backoff aborted on cancellation)", elapsed, expressQuoteBackoff)
 	}
 }

@@ -516,17 +516,24 @@ func (cs *checkout) quoteExpressShipping(ctx context.Context, address *pb.Addres
 	ctx, span := tracer.Start(ctx, "quoteExpressShipping")
 	defer span.End()
 
-	quote := standard
 	for attempt := 1; attempt <= expressQuoteAttempts; attempt++ {
 		q, err := cs.quoteShipping(ctx, address, items)
-		if err != nil {
-			logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
-		} else {
-			quote = q
+		if err == nil {
+			return q
 		}
-		time.Sleep(expressQuoteBackoff)
+		logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
+		if attempt == expressQuoteAttempts {
+			break
+		}
+		backoff := time.NewTimer(expressQuoteBackoff)
+		select {
+		case <-ctx.Done():
+			backoff.Stop()
+			return standard
+		case <-backoff.C:
+		}
 	}
-	return quote
+	return standard
 }
 
 func mustCreateClient(svcAddr string) *grpc.ClientConn {
