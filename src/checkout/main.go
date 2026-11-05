@@ -522,9 +522,15 @@ func (cs *checkout) quoteExpressShipping(ctx context.Context, address *pb.Addres
 		if err != nil {
 			logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
 		} else {
-			quote = q
+			return q
 		}
-		time.Sleep(expressQuoteBackoff)
+		if attempt < expressQuoteAttempts {
+			select {
+			case <-time.After(expressQuoteBackoff):
+			case <-ctx.Done():
+				return quote
+			}
+		}
 	}
 	return quote
 }
