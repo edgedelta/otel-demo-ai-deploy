@@ -187,3 +187,57 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+type fakeCartClient struct {
+	pb.CartServiceClient
+	items []*pb.CartItem
+}
+
+func (f fakeCartClient) GetCart(ctx context.Context, in *pb.GetCartRequest, opts ...grpc.CallOption) (*pb.Cart, error) {
+	return &pb.Cart{UserId: in.GetUserId(), Items: f.items}, nil
+}
+
+type fakeCatalogClient struct {
+	pb.ProductCatalogServiceClient
+}
+
+func (fakeCatalogClient) GetProduct(ctx context.Context, in *pb.GetProductRequest, opts ...grpc.CallOption) (*pb.Product, error) {
+	return &pb.Product{Id: in.GetId(), PriceUsd: &pb.Money{CurrencyCode: "USD", Units: 10}}, nil
+}
+
+type fakeCurrencyClient struct {
+	pb.CurrencyServiceClient
+}
+
+func (fakeCurrencyClient) Convert(ctx context.Context, in *pb.CurrencyConversionRequest, opts ...grpc.CallOption) (*pb.Money, error) {
+	return in.GetFrom(), nil
+}
+
+func TestPrepareOrderWithMultipleProductLines(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	cs := &checkout{
+		cartSvcClient:           fakeCartClient{items: []*pb.CartItem{{ProductId: "A", Quantity: 1}, {ProductId: "B", Quantity: 2}, {ProductId: "C", Quantity: 1}}},
+		productCatalogSvcClient: fakeCatalogClient{},
+		currencySvcClient:       fakeCurrencyClient{},
+		shippingSvcAddr:         "http://shipping.test",
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":5}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	out, err := cs.prepareOrderItemsAndShippingQuoteFromCart(context.Background(), "user-1", "USD", &pb.Address{})
+	if err != nil {
+		t.Fatalf("prepareOrderItemsAndShippingQuoteFromCart() error = %v", err)
+	}
+	if got := len(out.orderItems); got != 3 {
+		t.Errorf("len(orderItems) = %d, want 3", got)
+	}
+}
