@@ -519,12 +519,13 @@ func (cs *checkout) quoteExpressShipping(ctx context.Context, address *pb.Addres
 	quote := standard
 	for attempt := 1; attempt <= expressQuoteAttempts; attempt++ {
 		q, err := cs.quoteShipping(ctx, address, items)
-		if err != nil {
-			logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
-		} else {
-			quote = q
+		if err == nil {
+			return q
 		}
-		time.Sleep(expressQuoteBackoff)
+		logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
+		if attempt < expressQuoteAttempts {
+			time.Sleep(expressQuoteBackoff)
+		}
 	}
 	return quote
 }

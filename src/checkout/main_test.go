@@ -187,3 +187,51 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShipping(t *testing.T) {
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+	express := `{"cost_usd":{"currency_code":"USD","units":12}}`
+
+	tests := []struct {
+		desc      string
+		fail      int // number of leading failing calls
+		wantCalls int
+		wantUnits int64
+		maxTime   time.Duration
+	}{
+		{desc: "first attempt succeeds without sleeping", fail: 0, wantCalls: 1, wantUnits: 12, maxTime: expressQuoteBackoff / 2},
+		{desc: "succeeds after one failure", fail: 1, wantCalls: 2, wantUnits: 12, maxTime: 2 * expressQuoteBackoff},
+		{desc: "all attempts fail, no sleep after last", fail: expressQuoteAttempts, wantCalls: expressQuoteAttempts, wantUnits: 5, maxTime: time.Duration(expressQuoteAttempts)*expressQuoteBackoff - expressQuoteBackoff/2},
+	}
+	for _, tc := range tests {
+		calls := 0
+		cs := &checkout{
+			shippingSvcAddr: "http://shipping.test",
+			httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				status, body := http.StatusOK, express
+				if calls <= tc.fail {
+					status, body = http.StatusInternalServerError, ""
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+			})},
+		}
+		start := time.Now()
+		got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+		elapsed := time.Since(start)
+		if calls != tc.wantCalls {
+			t.Errorf("%s: calls = %d, want %d", tc.desc, calls, tc.wantCalls)
+		}
+		if got.GetUnits() != tc.wantUnits {
+			t.Errorf("%s: units = %d, want %d", tc.desc, got.GetUnits(), tc.wantUnits)
+		}
+		if elapsed > tc.maxTime {
+			t.Errorf("%s: took %v, want at most %v", tc.desc, elapsed, tc.maxTime)
+		}
+	}
+}
