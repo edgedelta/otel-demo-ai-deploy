@@ -187,3 +187,61 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+type fakeCartClient struct {
+	pb.CartServiceClient
+	items []*pb.CartItem
+}
+
+func (f fakeCartClient) GetCart(context.Context, *pb.GetCartRequest, ...grpc.CallOption) (*pb.Cart, error) {
+	return &pb.Cart{Items: f.items}, nil
+}
+
+type fakeCatalogClient struct{ pb.ProductCatalogServiceClient }
+
+func (fakeCatalogClient) GetProduct(_ context.Context, req *pb.GetProductRequest, _ ...grpc.CallOption) (*pb.Product, error) {
+	return &pb.Product{Id: req.GetId(), PriceUsd: &pb.Money{CurrencyCode: "USD", Units: 10}}, nil
+}
+
+type fakeCurrencyClient struct{ pb.CurrencyServiceClient }
+
+func (fakeCurrencyClient) Convert(_ context.Context, req *pb.CurrencyConversionRequest, _ ...grpc.CallOption) (*pb.Money, error) {
+	return &pb.Money{CurrencyCode: req.GetToCode(), Units: req.GetFrom().GetUnits()}, nil
+}
+
+func TestPrepareOrderItemsAcceptsMultiLineCart(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	cart := []*pb.CartItem{
+		{ProductId: "p1", Quantity: 1},
+		{ProductId: "p2", Quantity: 2},
+		{ProductId: "p3", Quantity: 3},
+	}
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":5}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+	cs := &checkout{
+		cartSvcClient:           fakeCartClient{items: cart},
+		productCatalogSvcClient: fakeCatalogClient{},
+		currencySvcClient:       fakeCurrencyClient{},
+		shippingSvcAddr:         "http://shipping.test",
+		httpClient:              httpClient,
+	}
+
+	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(context.Background(), "user-1", "USD", &pb.Address{})
+	if err != nil {
+		t.Fatalf("multi-line cart rejected: %v", err)
+	}
+	if got := len(prep.orderItems); got != len(cart) {
+		t.Errorf("order items = %d, want %d", got, len(cart))
+	}
+}
