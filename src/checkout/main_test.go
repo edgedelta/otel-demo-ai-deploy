@@ -187,3 +187,66 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShippingReturnsOnSuccessWithoutSleeping(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	calls := 0
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":12,"nanos":0}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, &pb.Money{CurrencyCode: "USD", Units: 5})
+	if elapsed := time.Since(start); elapsed >= expressQuoteBackoff {
+		t.Fatalf("quoteExpressShipping took %v on success, want < %v", elapsed, expressQuoteBackoff)
+	}
+	if calls != 1 {
+		t.Fatalf("shipping quote calls = %d, want 1", calls)
+	}
+	if got.GetUnits() != 12 {
+		t.Fatalf("quote units = %d, want 12", got.GetUnits())
+	}
+}
+
+func TestQuoteExpressShippingFallsBackAfterFailures(t *testing.T) {
+	prevTracer, prevLogger := tracer, logger
+	tracer = noop.NewTracerProvider().Tracer("test")
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	t.Cleanup(func() { tracer, logger = prevTracer, prevLogger })
+
+	calls := 0
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return nil, fmt.Errorf("boom")
+		})},
+	}
+
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+	elapsed := time.Since(start)
+	if got != standard {
+		t.Fatalf("expected fallback to standard quote")
+	}
+	if calls != expressQuoteAttempts {
+		t.Fatalf("shipping quote calls = %d, want %d", calls, expressQuoteAttempts)
+	}
+	// sleeps only between attempts: (attempts-1) backoffs, not attempts
+	if max := time.Duration(expressQuoteAttempts-1)*expressQuoteBackoff + 400*time.Millisecond; elapsed > max {
+		t.Fatalf("elapsed %v, want <= %v", elapsed, max)
+	}
+}
