@@ -187,3 +187,54 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+type fakeCartClient struct {
+	pb.CartServiceClient
+	items []*pb.CartItem
+}
+
+func (f fakeCartClient) GetCart(context.Context, *pb.GetCartRequest, ...grpc.CallOption) (*pb.Cart, error) {
+	return &pb.Cart{Items: f.items}, nil
+}
+
+type fakeCatalogClient struct{ pb.ProductCatalogServiceClient }
+
+func (fakeCatalogClient) GetProduct(_ context.Context, in *pb.GetProductRequest, _ ...grpc.CallOption) (*pb.Product, error) {
+	return &pb.Product{Id: in.GetId(), PriceUsd: &pb.Money{CurrencyCode: "USD", Units: 10}}, nil
+}
+
+type fakeCurrencyClient struct{ pb.CurrencyServiceClient }
+
+func (fakeCurrencyClient) Convert(_ context.Context, in *pb.CurrencyConversionRequest, _ ...grpc.CallOption) (*pb.Money, error) {
+	return in.GetFrom(), nil
+}
+
+func TestPrepareOrderAllowsMultipleProducts(t *testing.T) {
+	tracer = noop.NewTracerProvider().Tracer("test")
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		cartSvcClient: fakeCartClient{items: []*pb.CartItem{
+			{ProductId: "p1", Quantity: 1},
+			{ProductId: "p2", Quantity: 2},
+			{ProductId: "p3", Quantity: 1},
+		}},
+		productCatalogSvcClient: fakeCatalogClient{},
+		currencySvcClient:       fakeCurrencyClient{},
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":5}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	got, err := cs.prepareOrderItemsAndShippingQuoteFromCart(context.Background(), "user-1", "USD", &pb.Address{})
+	if err != nil {
+		t.Fatalf("multi-product cart rejected: %v", err)
+	}
+	if len(got.orderItems) != 3 {
+		t.Errorf("orderItems = %d, want 3", len(got.orderItems))
+	}
+}
