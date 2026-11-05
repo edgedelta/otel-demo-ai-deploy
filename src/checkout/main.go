@@ -516,17 +516,25 @@ func (cs *checkout) quoteExpressShipping(ctx context.Context, address *pb.Addres
 	ctx, span := tracer.Start(ctx, "quoteExpressShipping")
 	defer span.End()
 
-	quote := standard
+	return retryExpressQuote(
+		func() (*pb.Money, error) { return cs.quoteShipping(ctx, address, items) },
+		time.Sleep,
+		standard,
+	)
+}
+
+// retryExpressQuote returns the first successful quote, sleeping only after a failed attempt.
+// If all attempts fail, it returns the fallback.
+func retryExpressQuote(quoteFn func() (*pb.Money, error), sleep func(time.Duration), fallback *pb.Money) *pb.Money {
 	for attempt := 1; attempt <= expressQuoteAttempts; attempt++ {
-		q, err := cs.quoteShipping(ctx, address, items)
-		if err != nil {
-			logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
-		} else {
-			quote = q
+		q, err := quoteFn()
+		if err == nil {
+			return q
 		}
-		time.Sleep(expressQuoteBackoff)
+		logger.Warn("express shipping quote failed", slog.Int("attempt", attempt), slog.Any("error", err))
+		sleep(expressQuoteBackoff)
 	}
-	return quote
+	return fallback
 }
 
 func mustCreateClient(svcAddr string) *grpc.ClientConn {
