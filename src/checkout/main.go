@@ -83,9 +83,16 @@ const expressShippingFlag = "checkout-express-shipping"
 
 // ordersByCurrency counts placed orders per user currency.
 var (
-	ordersByCurrency   map[string]int
+	ordersByCurrency   = make(map[string]int)
 	ordersByCurrencyMu sync.Mutex
 )
+
+// recordOrderCurrency increments the placed-order counter for a currency.
+func recordOrderCurrency(currency string) {
+	ordersByCurrencyMu.Lock()
+	ordersByCurrency[currency]++
+	ordersByCurrencyMu.Unlock()
+}
 
 // ldContext is the LaunchDarkly evaluation context for this service.
 var ldContext = ldcontext.New("checkout")
@@ -379,9 +386,7 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
 
-	ordersByCurrencyMu.Lock()
-	ordersByCurrency[req.UserCurrency]++
-	ordersByCurrencyMu.Unlock()
+	recordOrderCurrency(req.UserCurrency)
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
