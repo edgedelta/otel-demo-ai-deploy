@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -185,5 +186,51 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "Kafka producer is not initialized") {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
+	}
+}
+
+type fakeCartClient struct {
+	pb.CartServiceClient
+	items []*pb.CartItem
+}
+
+func (f fakeCartClient) GetCart(context.Context, *pb.GetCartRequest, ...grpc.CallOption) (*pb.Cart, error) {
+	return &pb.Cart{Items: f.items}, nil
+}
+
+type fakeCatalogClient struct{ pb.ProductCatalogServiceClient }
+
+func (fakeCatalogClient) GetProduct(_ context.Context, in *pb.GetProductRequest, _ ...grpc.CallOption) (*pb.Product, error) {
+	return &pb.Product{Id: in.GetId(), PriceUsd: &pb.Money{CurrencyCode: "USD", Units: 10}}, nil
+}
+
+type fakeCurrencyClient struct{ pb.CurrencyServiceClient }
+
+func (fakeCurrencyClient) Convert(_ context.Context, in *pb.CurrencyConversionRequest, _ ...grpc.CallOption) (*pb.Money, error) {
+	return in.GetFrom(), nil
+}
+
+func TestPrepareOrderAcceptsMultiProductCart(t *testing.T) {
+	tracer = noop.NewTracerProvider().Tracer("test")
+	shipping := http.NewServeMux()
+	shipping.HandleFunc("/get-quote", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"cost_usd":{"currency_code":"USD","units":5}}`)
+	})
+	srv := httptest.NewServer(shipping)
+	defer srv.Close()
+
+	cs := &checkout{
+		shippingSvcAddr:         srv.URL,
+		httpClient:              srv.Client(),
+		cartSvcClient:           fakeCartClient{items: []*pb.CartItem{{ProductId: "A", Quantity: 1}, {ProductId: "B", Quantity: 2}, {ProductId: "C", Quantity: 1}}},
+		productCatalogSvcClient: fakeCatalogClient{},
+		currencySvcClient:       fakeCurrencyClient{},
+	}
+	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(context.Background(), "user", "USD", &pb.Address{})
+	if err != nil {
+		t.Fatalf("multi-product cart was rejected: %v", err)
+	}
+	if got, want := len(prep.orderItems), 3; got != want {
+		t.Errorf("order items: got %d, want %d", got, want)
 	}
 }
