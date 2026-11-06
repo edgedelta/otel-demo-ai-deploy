@@ -83,7 +83,7 @@ const expressShippingFlag = "checkout-express-shipping"
 
 // ordersByCurrency counts placed orders per user currency.
 var (
-	ordersByCurrency   map[string]int
+	ordersByCurrency   map[string]int = map[string]int{}
 	ordersByCurrencyMu sync.Mutex
 )
 
