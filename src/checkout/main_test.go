@@ -187,3 +187,51 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func newExpressQuoteTest(t *testing.T, statuses []int) (*checkout, *int, *[]time.Duration) {
+	t.Helper()
+	prevLogger, prevTracer, prevSleep := logger, tracer, expressQuoteSleep
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	sleeps := []time.Duration{}
+	expressQuoteSleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+	t.Cleanup(func() { logger, tracer, expressQuoteSleep = prevLogger, prevTracer, prevSleep })
+
+	calls := 0
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			status := statuses[calls]
+			calls++
+			return &http.Response{
+				StatusCode: status,
+				Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":7}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}
+	return cs, &calls, &sleeps
+}
+
+func TestQuoteExpressShippingSuccessDoesNotSleep(t *testing.T) {
+	cs, calls, sleeps := newExpressQuoteTest(t, []int{200})
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, &pb.Money{Units: 1})
+	if got.GetUnits() != 7 {
+		t.Fatalf("units = %d, want 7", got.GetUnits())
+	}
+	if *calls != 1 || len(*sleeps) != 0 {
+		t.Fatalf("calls = %d, sleeps = %v; want 1 call and no sleeps", *calls, *sleeps)
+	}
+}
+
+func TestQuoteExpressShippingBacksOffOnlyBetweenFailures(t *testing.T) {
+	cs, calls, sleeps := newExpressQuoteTest(t, []int{500, 500, 500})
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, &pb.Money{Units: 1})
+	if got.GetUnits() != 1 {
+		t.Fatalf("units = %d, want standard fallback 1", got.GetUnits())
+	}
+	if *calls != expressQuoteAttempts || len(*sleeps) != expressQuoteAttempts-1 {
+		t.Fatalf("calls = %d, sleeps = %v; want %d calls and %d sleeps", *calls, *sleeps, expressQuoteAttempts, expressQuoteAttempts-1)
+	}
+}
