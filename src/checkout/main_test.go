@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -185,5 +186,36 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "Kafka producer is not initialized") {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
+	}
+}
+
+func TestQuoteExpressShippingNoDelayOnSuccess(t *testing.T) {
+	prevLogger, prevTracer := logger, tracer
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"cost_usd":{"currency_code":"USD","units":7,"nanos":0}}`))
+	}))
+	defer srv.Close()
+
+	cs := &checkout{shippingSvcAddr: srv.URL, httpClient: srv.Client()}
+	standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+	elapsed := time.Since(start)
+
+	if calls != 1 {
+		t.Errorf("expected 1 quote call, got %d", calls)
+	}
+	if got.GetUnits() != 7 {
+		t.Errorf("expected express quote of 7 units, got %v", got)
+	}
+	if elapsed >= expressQuoteBackoff {
+		t.Errorf("expected no backoff delay on first-attempt success, took %v", elapsed)
 	}
 }
