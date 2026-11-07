@@ -187,3 +187,68 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShippingBackoff(t *testing.T) {
+	quoteBody := func(req *http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":7,"nanos":0}}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}
+	}
+	run := func(t *testing.T, failures int) (calls int, elapsed time.Duration, got *pb.Money) {
+		t.Helper()
+		prevLogger, prevTracer := logger, tracer
+		t.Cleanup(func() { logger, tracer = prevLogger, prevTracer })
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		tracer = noop.NewTracerProvider().Tracer("test")
+		cs := &checkout{
+			shippingSvcAddr: "http://shipping.test",
+			httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if calls <= failures {
+					return nil, fmt.Errorf("boom")
+				}
+				return quoteBody(req), nil
+			})},
+		}
+		standard := &pb.Money{CurrencyCode: "USD", Units: 5}
+		start := time.Now()
+		got = cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, standard)
+		return calls, time.Since(start), got
+	}
+
+	t.Run("first success returns immediately without sleeping", func(t *testing.T) {
+		calls, elapsed, got := run(t, 0)
+		if calls != 1 {
+			t.Fatalf("calls = %d, want 1", calls)
+		}
+		if got.GetUnits() != 7 {
+			t.Fatalf("units = %d, want 7", got.GetUnits())
+		}
+		if elapsed >= expressQuoteBackoff {
+			t.Fatalf("elapsed = %v, want < %v", elapsed, expressQuoteBackoff)
+		}
+	})
+
+	t.Run("backs off only between failed attempts", func(t *testing.T) {
+		calls, elapsed, got := run(t, 1)
+		if calls != 2 || got.GetUnits() != 7 {
+			t.Fatalf("calls = %d units = %d, want 2 and 7", calls, got.GetUnits())
+		}
+		if elapsed < expressQuoteBackoff || elapsed >= 2*expressQuoteBackoff {
+			t.Fatalf("elapsed = %v, want one backoff", elapsed)
+		}
+	})
+
+	t.Run("all failures fall back to standard without trailing sleep", func(t *testing.T) {
+		calls, elapsed, got := run(t, 99)
+		if calls != expressQuoteAttempts || got.GetUnits() != 5 {
+			t.Fatalf("calls = %d units = %d, want %d and 5", calls, got.GetUnits(), expressQuoteAttempts)
+		}
+		if max := time.Duration(expressQuoteAttempts) * expressQuoteBackoff; elapsed >= max {
+			t.Fatalf("elapsed = %v, want < %v", elapsed, max)
+		}
+	})
+}
