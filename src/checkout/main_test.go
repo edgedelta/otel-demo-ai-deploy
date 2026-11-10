@@ -187,3 +187,39 @@ func TestSendToPostProcessorWithNilProducerDoesNotPanic(t *testing.T) {
 		t.Errorf("expected diagnostic log for nil producer, got: %q", logs.String())
 	}
 }
+
+func TestQuoteExpressShippingSuccessDoesNotSleep(t *testing.T) {
+	prevTracer := tracer
+	tracer = noop.NewTracerProvider().Tracer("test")
+	t.Cleanup(func() { tracer = prevTracer })
+
+	calls := 0
+	cs := &checkout{
+		shippingSvcAddr: "http://shipping.test",
+		httpClient: &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"cost_usd":{"currency_code":"USD","units":12,"nanos":0}}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	start := time.Now()
+	got := cs.quoteExpressShipping(context.Background(), &pb.Address{}, nil, &pb.Money{CurrencyCode: "USD", Units: 5})
+	elapsed := time.Since(start)
+
+	if calls != 1 {
+		t.Errorf("quoteShipping calls = %d, want 1", calls)
+	}
+	if got.GetUnits() != 12 {
+		t.Errorf("quote units = %d, want 12", got.GetUnits())
+	}
+	if elapsed >= expressQuoteBackoff {
+		t.Errorf("successful quote took %v, want less than backoff %v", elapsed, expressQuoteBackoff)
+	}
+}
